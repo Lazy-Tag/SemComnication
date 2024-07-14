@@ -1,12 +1,18 @@
 import socket
 import pickle
 import struct
+import numpy as np
+import cv2
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtGui import QImage
 
 class SocketCommunicator(QObject):
     log_text_signal = pyqtSignal(str)
     update_text_signal = pyqtSignal(str)
+    change_pixmap_signal = pyqtSignal(QImage)
 
     def __init__(self, host, port):
         super().__init__()
@@ -63,8 +69,10 @@ class SocketCommunicator(QObject):
             try:
                 self.conn.sendall(data_length + serialized_data)
             except socket.error as e:
-                self.log_text_signal.emit(f"[ERROR] Error sending data: {e}\n")
+                self.log_text_signal.emit(f"[ERROR] {e}\n")
                 self.close_connection()
+        else:
+            self.log_text_signal.emit(f"[INFO] Not Connected!\n")
 
     def receive_data(self):
         while self.conn:
@@ -76,7 +84,24 @@ class SocketCommunicator(QObject):
                 data = self.recvall(data_length)
                 if data:
                     deserialized_data = pickle.loads(data)
-                    self.update_text_signal.emit(f"[DATA] Received data: {deserialized_data}\n")
+                    if isinstance(deserialized_data, str) and deserialized_data.startswith("Text:"):
+                        text_data = deserialized_data[len("Text:"):]
+                        self.update_text_signal.emit(f"[TEXT] Received text: {text_data}\n")
+                    elif isinstance(deserialized_data, bytes) and deserialized_data.startswith(b"Image:"):
+                        image_data = deserialized_data[len("Image:"):]
+                        self.update_text_signal.emit(
+                            f"[IMAGE] Received image data of length: {len(image_data)} bytes\n")
+                        nparr = np.frombuffer(image_data, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            h, w, ch = rgb_image.shape
+                            bytes_per_line = ch * w
+                            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                            scaled_image = qt_image.scaled(640, 480, Qt.AspectRatioMode.KeepAspectRatio)
+                            self.change_pixmap_signal.emit(scaled_image)
+                    else:
+                        self.update_text_signal.emit(f"[UNKNOWN] Received unknown data type\n")
             except Exception as e:
                 self.log_text_signal.emit(f"[ERROR] {e}\n")
                 break

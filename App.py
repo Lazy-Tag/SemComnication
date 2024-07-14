@@ -24,9 +24,10 @@ class App(QtWidgets.QMainWindow):
         self.socket_comm = SocketCommunicator('localhost', 12345)
         self.socket_comm.log_text_signal.connect(self.update_log)
         self.socket_comm.update_text_signal.connect(self.update_text)
+        self.socket_comm.change_pixmap_signal.connect(self.update_image)
 
         # 设置线程和信号连接
-        self.video_thread = VideoThread()
+        self.video_thread = VideoThread(self.socket_comm)
         self.video_thread.change_pixmap_signal.connect(self.update_image)
         self.video_thread.start()
 

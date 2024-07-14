@@ -38,6 +38,6 @@ class AudioThread(QThread):
                 if last_result != result:
                     new_text = result[len(last_result):]  # 新的部分
                     if new_text:
-                        self.socket_comm.send_data(new_text)
+                        self.socket_comm.send_data("Text:" + new_text)
                     last_result = result
 
