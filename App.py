@@ -1,11 +1,13 @@
 from PyQt6 import QtWidgets, uic
 from PyQt6.QtGui import QPixmap, QTextCursor
+from PyQt6.QtWidgets import QMessageBox
+
 from Video.VideoThread import VideoThread
 from Audio.AudioThread import AudioThread
-
 from Socket.SocketCommunicator import SocketCommunicator
 from Socket.ServerThread import ServerThread
 from Socket.ClientThread import ClientThread
+
 
 class App(QtWidgets.QMainWindow):
     def __init__(self):
@@ -18,25 +20,31 @@ class App(QtWidgets.QMainWindow):
         self.text_edit = self.findChild(QtWidgets.QTextEdit, 'textEdit')
         self.log_edit = self.findChild(QtWidgets.QTextEdit, 'LogText')
         self.call_button = self.findChild(QtWidgets.QPushButton, 'CallButton')
-        self.answer_button = self.findChild(QtWidgets.QPushButton, 'AnswerButton')
         self.stop_button = self.findChild(QtWidgets.QPushButton, 'StopButton')
+        self.call_ip_address = self.findChild(QtWidgets.QLineEdit, 'IPInput')
+        self.call_port_address = self.findChild(QtWidgets.QLineEdit, 'PortInput')
 
-        self.socket_comm = SocketCommunicator('localhost', 12345)
+        self.socket_comm = SocketCommunicator('127.0.0.1', 0)
         self.socket_comm.log_text_signal.connect(self.update_log)
         self.socket_comm.update_text_signal.connect(self.update_text)
         self.socket_comm.change_pixmap_signal.connect(self.update_image)
+        self.socket_comm.confirm_signal.connect(self.show_confirmation_dialog)
 
-        # 设置线程和信号连接
+        self.call_button.clicked.connect(self.CallButtonClicked)
+        self.stop_button.clicked.connect(self.StopButtonClicked)
+
+        # 设置视频线程
         self.video_thread = VideoThread(self.socket_comm)
         self.video_thread.change_pixmap_signal.connect(self.update_image)
         self.video_thread.start()
 
+        # 设置音频线程
         self.audio_thread = AudioThread(self.socket_comm)
         self.audio_thread.start()
 
-        self.call_button.clicked.connect(self.CallButtonClicked)
-        self.answer_button.clicked.connect(self.AnswerButtonClicked)
-        self.stop_button.clicked.connect(self.StopButtonClicked)
+        # 设置服务端通信线程
+        self.server_thread = ServerThread(self.socket_comm)
+        self.server_thread.start()
 
     def update_image(self, cv_img):
         # 转换 QImage 到 QPixmap 并更新 QLabel
@@ -52,18 +60,26 @@ class App(QtWidgets.QMainWindow):
         self.log_edit.insertPlainText(text)
 
     def CallButtonClicked(self):
-        self.server_thread = ServerThread(self.socket_comm)
-        self.server_thread.start()
+        self.socket_comm.set_address(self.call_ip_address.text(), self.call_port_address.text())
+        self.client_thread = ClientThread(self.socket_comm)
+        self.client_thread.start()
 
-    def AnswerButtonClicked(self):
-        self.server_thread = ClientThread(self.socket_comm)
-        self.server_thread.start()
+    def show_confirmation_dialog(self, addr):
+        # 在主线程中显示确认对话框
+        result = QMessageBox.question(self, "Confirm Connection",
+                                      f"Accept connection from {addr}?",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        confirmation = (result == QMessageBox.StandardButton.Yes)
+        # 将确认结果发送回线程
+        self.socket_comm.set_confirmation(confirmation)
 
     def StopButtonClicked(self):
         self.socket_comm.send_data(f'\n[INFO] The other party disconnected\n');
         exit(0)
 
     def closeEvent(self, event):
+        self.socket_comm.close_connection()
         self.video_thread.quit()
         self.video_thread.wait()
         self.audio_thread.quit()

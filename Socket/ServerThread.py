@@ -1,4 +1,5 @@
 from PyQt6.QtCore import QThread
+from Socket.SocketCommunicator import SocketCommunicator
 
 class ServerThread(QThread):
     def __init__(self, socket_comm):

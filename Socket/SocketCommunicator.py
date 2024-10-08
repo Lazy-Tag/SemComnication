@@ -3,8 +3,9 @@ import pickle
 import struct
 import numpy as np
 import cv2
+import threading
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtGui import QImage
@@ -13,15 +14,29 @@ class SocketCommunicator(QObject):
     log_text_signal = pyqtSignal(str)
     update_text_signal = pyqtSignal(str)
     change_pixmap_signal = pyqtSignal(QImage)
-
+    confirm_signal = pyqtSignal(tuple)
     def __init__(self, host, port):
         super().__init__()
         self.host = host
         self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_sock = None
+        self.client_sock = None
         self.conn = None
         self.addr = None
         self.listening = False
+        self.confirm_event = threading.Event()
+        self._initialize_sockets()
+
+    def _initialize_sockets(self):
+        # Initialize sockets
+        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Set socket options to allow quick reuse and prevent TIME_WAIT issues
+        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    def set_address(self, ip, port):
+        self.host = ip
+        self.port = int(port)
 
     def start_server(self):
         if self.listening or self.conn:
@@ -31,36 +46,56 @@ class SocketCommunicator(QObject):
                 self.log_text_signal.emit(f"[INFO] Connected!\n")
             return False
 
-        if self.sock.fileno() == -1:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind((self.host, self.port))
-        self.sock.listen(1)
-        self.listening = True
+        try:
+            if self.server_sock.fileno() == -1:
+                self._initialize_sockets()
+            self.server_sock.bind((self.host, self.port))
+            self.port = self.server_sock.getsockname()[1]
+            self.log_text_signal.emit(f"[INFO] Listening on {self.host}:{self.port}...\n")
+            self.server_sock.listen(1)
+            self.listening = True
 
-        self.log_text_signal.emit(f"[INFO] Listening on {self.host}:{self.port}...\n")
-        self.conn, self.addr = self.sock.accept()
-        self.listening = False
-        self.log_text_signal.emit(f"[INFO] Connected by {self.addr}\n")
+            while True:
+                self.log_text_signal.emit(f"[INFO] Waiting for connection...\n")
+                # 1. 等待连接请求
+                potential_conn, potential_addr = self.server_sock.accept()
 
-        self.receive_data()
-        return True
+                # 2. 请求用户确认连接
+                self.log_text_signal.emit(
+                    f"[INFO] Incoming connection from {potential_addr}, awaiting confirmation...\n")
+
+                self.confirm_signal.emit(potential_addr)
+                # 等待确认结果
+                self.confirm_event.wait()
+
+                if self.confirm_result:
+                    self.conn, self.addr = potential_conn, potential_addr
+                    self.listening = False
+                    self.log_text_signal.emit(f"[INFO] Connected by {self.addr}\n")
+                    self.receive_data()
+                else:
+                    self.log_text_signal.emit(f"[INFO] Connection from {potential_addr} rejected\n")
+                    potential_conn.close()
+
+
+        except socket.error as e:
+            self.log_text_signal.emit(f"[ERROR] Server error: {e}\n")
+            self.close_connection()
+
+    def set_confirmation(self, result):
+        # 主线程中调用的确认函数
+        self.confirm_result = result
+        self.confirm_event.set()  # 通知子线程继续执行
 
     def start_client(self):
-        if self.listening or self.conn:
-            if self.listening:
-                self.log_text_signal.emit(f"[INFO] Listening on {self.host}:{self.port}...\n")
-            else:
-                self.log_text_signal.emit(f"[INFO] Connected!\n")
-            return
-
-        self.log_text_signal.emit(f"[INFO] Connect {self.host}:{self.port}\n")
         try:
-            self.sock.connect((self.host, self.port))
+            self.client_sock.connect((self.host, self.port))
+            self.log_text_signal.emit(f"[INFO] Connected to {self.host}:{self.port}\n")
+            self.conn = self.client_sock
+            self.receive_data()
         except socket.error as e:
             self.log_text_signal.emit(f"[ERROR] Connection failed: {e}\n")
-            return False
-        self.conn = self.sock
-        self.receive_data()
+            self.close_connection()
 
     def send_data(self, data):
         serialized_data = pickle.dumps(data)
@@ -71,8 +106,6 @@ class SocketCommunicator(QObject):
             except socket.error as e:
                 self.log_text_signal.emit(f"[ERROR] {e}\n")
                 self.close_connection()
-        else:
-            self.log_text_signal.emit(f"[INFO] Not Connected!\n")
 
     def receive_data(self):
         while self.conn:
@@ -85,12 +118,11 @@ class SocketCommunicator(QObject):
                 if data:
                     deserialized_data = pickle.loads(data)
                     if isinstance(deserialized_data, str) and deserialized_data.startswith("Text:"):
-                        text_data = deserialized_data[len("Text:"):]
+                        text_data = deserialized_data[len("Text:") :]
                         self.update_text_signal.emit(f"[TEXT] Received text: {text_data}\n")
                     elif isinstance(deserialized_data, bytes) and deserialized_data.startswith(b"Image:"):
-                        image_data = deserialized_data[len("Image:"):]
-                        self.update_text_signal.emit(
-                            f"[IMAGE] Received image data of length: {len(image_data)} bytes\n")
+                        image_data = deserialized_data[len("Image:") :]
+                        self.update_text_signal.emit(f"[IMAGE] Received image")
                         nparr = np.frombuffer(image_data, np.uint8)
                         frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         if frame is not None:
@@ -105,22 +137,35 @@ class SocketCommunicator(QObject):
             except Exception as e:
                 self.log_text_signal.emit(f"[ERROR] {e}\n")
                 break
+        self.close_connection()
 
     def recvall(self, n):
         data = b''
         while len(data) < n:
-            packet = self.conn.recv(n - len(data))
-            if not packet:
+            try:
+                packet = self.conn.recv(n - len(data))
+                if not packet:
+                    return None
+                data += packet
+            except socket.error as e:
+                self.log_text_signal.emit(f"[ERROR] recv failed: {e}\n")
                 return None
-            data += packet
         return data
 
     def close_connection(self):
-        self.log_text_signal.emit(f"[INFO] Connection is closed.\n")
         if self.conn:
-            self.conn.close()
-            self.conn = None
-        else:
-            return
-        self.sock.close()
+            self.log_text_signal.emit(f"[INFO] Connection is closed.\n")
+            try:
+                self.conn.close()
+            except socket.error as e:
+                self.log_text_signal.emit(f"[ERROR] Closing connection failed: {e}\n")
+            finally:
+                self.conn = None
 
+        if self.client_sock:
+            try:
+                self.client_sock.close()
+            except socket.error as e:
+                self.log_text_signal.emit(f"[ERROR] Closing client socket failed: {e}\n")
+            finally:
+                self.client_sock = None
